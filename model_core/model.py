@@ -1,5 +1,9 @@
-
-
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from dataclasses import dataclass
+import inspect
+from attention import CasualSelfAttention
 
 class MLP(nn.Module):
 
@@ -91,7 +95,7 @@ class GPT(nn.Module):
         
         return logits, loss
     
-    def configure_optimizers(self, weight_decay, learning_rate, device_type):
+    def configure_optimizers(self, weight_decay, learning_rate, device_type, master_process):
        #taking all candidate parameters that require grad
         param_dict = {pn:p for pn, p in self.named_parameters()}
         param_dict = {pn:p for pn, p in param_dict.items() if p.requires_grad}
@@ -113,3 +117,4 @@ class GPT(nn.Module):
             print(f"using fused AdamW: {use_fused}")
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9,0.95), eps=1e-8, fused=use_fused)
         return optimizer 
+    
