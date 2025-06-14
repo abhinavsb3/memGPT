@@ -1,4 +1,6 @@
 import os
+import numpy as np
+import torch
 
 #Data loader
 class DataLoaderLite:
@@ -44,7 +46,7 @@ class DataLoaderLite:
 
         if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
             self.current_shard = (self.current_shard + 1) % len(self.shards)
-            self.tokens = load_tokens(self.shards[self.current_shard])
+            self.tokens = self.load_tokens(self.shards[self.current_shard])
             self.current_position = B * T * self.process_rank
         return x, y
 

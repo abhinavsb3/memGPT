@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 import tiktoken
-from ModelGPT2 import GPT
+from model import GPT
 
 def generate_text(model, prompt, num_return_sequences=4, max_length=32, device='cuda'):
         model.eval()
@@ -10,7 +10,6 @@ def generate_text(model, prompt, num_return_sequences=4, max_length=32, device='
         tokens = torch.tensor(tokens, dtype=torch.long)
         tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
         xgen = tokens.to(device)
-        
         sample_rng = torch.Generator(device=device)
         sample_rng.manual_seed(42)
         

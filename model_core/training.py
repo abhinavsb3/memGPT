@@ -9,9 +9,18 @@ import torch.distributed as dist
 import os
 import torch
 import time
+import json
+import math
+from model import GPT,GPTConfig
 
 
-def train_nanogpt(model_class, model_config_class, dataloader_class, max_steps=19073, log_dir="log"):
+def train_memgpt(config_path,dataloader_class=None):    
+
+    with open(config_path,'r') as f:
+        cfg = json.load(f)
+    
+    model_cfg_params = cfg['model']
+    train_cfg_params = cfg['training']
 
     ddp = int(os.environ.get('RANK', -1)) != -1
     if ddp:
@@ -41,23 +50,36 @@ def train_nanogpt(model_class, model_config_class, dataloader_class, max_steps=1
     torch.manual_seed(1337)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(1337)
+    
 
-    total_batch_size = 524288
-    B = 64
-    T = 1024
+        # --- Use loaded training parameters ---
+    total_batch_size = train_cfg_params['total_batch_size']
+    B = train_cfg_params['B']
+    T = train_cfg_params['T']
+    max_steps = train_cfg_params['max_steps']
+    log_dir = train_cfg_params['log_dir']
+    max_lr = train_cfg_params['max_lr']
+    min_lr = train_cfg_params['min_lr']
+    warmup_steps = train_cfg_params['warmup_steps']
+    weight_decay = train_cfg_params['weight_decay']
+    base_learning_rate = train_cfg_params['learning_rate'] 
+
+    # total_batch_size = 524288
+    # B = 64
+    # T = 1024
     assert total_batch_size % (B * T * ddp_world_size) == 0
     grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
     if master_process:
         print(f"Total desired batch size: {total_batch_size}")
         print(f"Calculated gradient accumulation steps: {grad_accum_steps}")
 
-    train_loader = dataloader_class(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train")
-    val_loader = dataloader_class(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val")
+    train_loader = dataloader_class(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train",master_process=master_process)
+    val_loader = dataloader_class(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val",master_process=master_process)
 
     torch.set_float32_matmul_precision('high')
 
     # Create Model
-    model = model_class(model_config_class(vocab_size=50304))
+    model = GPT(GPTConfig(**model_cfg_params))
     model.to(device)
     use_compile = True
     if use_compile:
@@ -65,11 +87,6 @@ def train_nanogpt(model_class, model_config_class, dataloader_class, max_steps=1
     if ddp:
         model = DDP(model, device_ids=[ddp_local_rank])
     raw_model = model.module if ddp else model
-
-    max_lr = 6e-4
-    min_lr = max_lr * 0.1
-    warmup_steps = 715
-    max_steps = 19073
 
     def get_lr(it):
         if it < warmup_steps:
@@ -81,7 +98,7 @@ def train_nanogpt(model_class, model_config_class, dataloader_class, max_steps=1
         coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
         return min_lr + coeff * (max_lr - min_lr)
 
-    optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device_type=device_type)
+    optimizer = raw_model.configure_optimizers(weight_decay=weight_decay, learning_rate=base_learning_rate, device_type=device_type, master_process=master_process)
 
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, "log.txt")

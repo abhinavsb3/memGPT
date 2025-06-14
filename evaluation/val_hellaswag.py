@@ -3,7 +3,6 @@ from ..hellaswag import render_example, iterate_examples, get_most_likely_row
 import torch.distributed as dist 
 from torch.distributed import init_process_group, destroy_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
-import torch.distributed as dist
 import os
 from ..ModelGPT2 import GPT,log_file
 
@@ -49,9 +48,9 @@ checkpoint = torch.load(checkpoint_path, map_location=device)
 model_config = checkpoint['config']
 model_config.vocab_size = 50304 #for computational effciency(power of 2)
 model = GPT(model_config)
-
 # Load model state dict
 model.load_state_dict(checkpoint['model'])
+model = DDP(model, device_ids=[ddp_local_rank])
 model.to(device)
 
 
@@ -91,3 +90,5 @@ def evaluate_hellaswag(model, device, device_type, ddp, ddp_rank, ddp_world_size
             f.write(f"Final Hellaswag accuracy: {acc_norm:.4f}\n")   
 
 evaluate_hellaswag(model, device, device_type, ddp, ddp_rank, ddp_world_size, log_file, master_process)
+if ddp:
+    destroy_process_group()
