@@ -3,7 +3,7 @@ import numpy as np
 import torch
 
 #Data loader
-class DataLoaderLite:
+class DataLoader_1:
     def __init__(self, B, T, process_rank, num_processes, split, master_process):
         self.B = B
         self.T = T
