@@ -11,7 +11,7 @@ import torch
 import time
 import json
 import math
-from model import GPT,GPTConfig
+from .model import GPT,GPTConfig
 
 
 def train_memgpt(config_path,dataloader_class=None):    
@@ -81,7 +81,7 @@ def train_memgpt(config_path,dataloader_class=None):
     # Create Model
     model = GPT(GPTConfig(**model_cfg_params))
     model.to(device)
-    use_compile = True
+    use_compile = False #True THIS SHOULD CHANGE TO TRUE BEFORE TRAIING#DEBUG
     if use_compile:
         model = torch.compile(model)
     if ddp:

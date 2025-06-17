@@ -1,1 +1,4 @@
 data/edu_fineweb10B
+log/model*
+!log/model_final.pt
+data\hellaswag\hellaswag_val.jsonl

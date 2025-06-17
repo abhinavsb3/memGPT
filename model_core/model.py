@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
 import inspect
-from attention import CasualSelfAttention
+from .attention import CasualSelfAttention
 
 class MLP(nn.Module):
 

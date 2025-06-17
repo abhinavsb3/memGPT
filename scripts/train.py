@@ -1,4 +1,7 @@
-#call training code
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from model_core.training import train_memgpt
 from model_core.dataloader import DataLoaderLite
 
