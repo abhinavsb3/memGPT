@@ -1,0 +1,21 @@
+{
+  "model": {
+    "block_size": 1024,
+    "vocab_size": 50304,
+    "n_layer": 12,
+    "n_head": 12,
+    "n_embd": 768
+  },
+  "training": {
+    "max_steps": 19073,
+    "log_dir": "log",
+    "total_batch_size": 524288,
+    "B": 64,
+    "T": 1024,
+    "max_lr": 0.0006,
+    "min_lr": 0.00006,
+    "warmup_steps": 715,
+    "weight_decay": 0.1,
+    "learning_rate": 0.0006
+  }
+}
