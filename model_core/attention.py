@@ -173,6 +173,95 @@ class XLAttention(nn.Module):
             current_kv = kv_memories
 
         return y, current_kv
+
+class KNNAttention(nn.Module):
+    def __init__(self, config, knn, topk_retrieved_memories=3):
+        super().__init__()
+        assert config.n_embd % config.n_head == 0
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
+        self.head_dim = config.n_embd // config.n_head
+        self.dropout = nn.Dropout(config.dropout if hasattr(config, 'dropout') else 0.0)
+        self.scale = self.head_dim ** -0.5
+
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+        self.c_proj.MEMGPT_SCALE_INIT = 1
+
+        self.gate_bias = nn.Parameter(torch.randn(self.n_head, 1, 1))
+        self.topk_retrieved_memories = topk_retrieved_memories
+        self.knn = knn
+
+        self.rope = RotaryPositionalEncoding(self.head_dim, config.block_size)
+
+    def forward(self, x, xl_memory=None):
+        B, T, C = x.size()
+
+        qkv = self.c_attn(x)
+        q, k, v = qkv.split(self.n_embd, dim=2)
+
+        q = F.normalize(q, dim=-1)
+        k = F.normalize(k, dim=-1)
+
+        # Handle XL memory
+        if xl_memory is not None:
+            k_xl, v_xl = xl_memory.unbind(dim=-2)
+            k = torch.cat((k_xl, k), dim=1)
+            v = torch.cat((v_xl, v), dim=1)
+            xl_seq_len = k_xl.shape[1]
+
+        q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+        k = k.view(B, -1, self.n_head, self.head_dim).transpose(1, 2)
+        v = v.view(B, -1, self.n_head, self.head_dim).transpose(1, 2)
+
+        seq_len = k.shape[2]
+        q, k = self.rope.apply_rotary_pos_emb(q, k, seq_len)
+
+        # LOCAL ATTENTION
+        att = (q @ k.transpose(-2, -1)) * self.scale
+        mask = torch.tril(torch.ones(T, seq_len, device=x.device, dtype=torch.bool))
+        att = att.masked_fill(~mask, float('-inf'))
+        att = F.softmax(att, dim=-1)
+        att = self.dropout(att)
+        local_out = att @ v
+
+        # KNN ATTENTION ###
+        if self.knn.index.ntotal > 0:
+            q_search = q.transpose(1, 2).contiguous().view(B, T, C)
+            mem_kv = self.knn.search(q_search, topk=self.topk_retrieved_memories)
+            mem_k, mem_v = mem_kv.unbind(dim=-2)
+
+            mem_k = mem_k.view(B, T, self.topk_retrieved_memories, self.n_head, self.head_dim)
+            mem_k = mem_k.permute(0, 3, 1, 2, 4)  # (B, nh, T, k, hs)
+            mem_v = mem_v.view(B, T, self.topk_retrieved_memories, self.n_head, self.head_dim)
+            mem_v = mem_v.permute(0, 3, 1, 2, 4)  # (B, nh, T, k, hs)
+
+            mem_att = (q.unsqueeze(-2) @ mem_k.transpose(-2, -1)).squeeze(-2) * self.scale
+            mem_att = F.softmax(mem_att, dim=-1)
+            mem_att = self.dropout(mem_att)
+            mem_out = (mem_att.unsqueeze(-2) @ mem_v).squeeze(-2)
+
+            # Combine local and memory attention
+            y = mem_out * self.gate_bias + local_out * (1 - self.gate_bias)
+        else:
+            y = local_out
+
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        y = self.c_proj(y) #(B,T,C)
+
+        # Prepare new memories
+        k = k.transpose(1, 2).contiguous().view(B, -1, C)
+        v = v.transpose(1, 2).contiguous().view(B, -1, C)
+        kv_memories = torch.stack((k, v), dim=-2)
+
+        if xl_memory is not None:
+            current_kv = kv_memories[:, -xl_seq_len:] #(B,T,2,C)
+        else:
+            current_kv = kv_memories #(B,T,2,C)
+
+        self.knn.add(current_kv)
+
+        return y, current_kv #(B,T,C),(B,T,2,C)
     
     
         
