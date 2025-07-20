@@ -96,6 +96,9 @@ def train_memgpt(config_path,dataloader_class=None):
     log_file = os.path.join(log_dir, "log.txt")
     with open(log_file, "w") as f:
         pass
+    
+    xl_memories = None
+    previous_shards_num = None
 
     for step in range(max_steps):
         t0 = time.time()
@@ -104,22 +107,45 @@ def train_memgpt(config_path,dataloader_class=None):
         if step % 350 == 0 or last_step:
             model.eval()
             val_loader.reset()
+            raw_model.clear_knn_memory()
             with torch.no_grad():
                 val_loss_accum = 0.0
-                val_loss_steps = 20
+                val_loss_steps = 25
+                val_xl_memories = None
+                val_previous_shard_num = None
+
                 for _ in range(val_loss_steps):
-                    x, y = val_loader.next_batch()
+                    x, y, val_current_shard_num = val_loader.next_batch()
                     x, y = x.to(device), y.to(device)
+
+                    if val_previous_shard_num is not None and val_current_shard_num != val_previous_shard_num:
+                        raw_model.clear_knn_memory()
+                        val_xl_memories = None
+
+                    val_previous_shard_num = val_current_shard_num
+
                     with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                        logits, loss = model(x, y)
+                        
+                        model_output = model(x, targets=y, xl_memories=val_xl_memories)
+
+                        if len(model_output) == 3:
+                            logits, loss, val_xl_memories = model_output
+                            
+                            if val_xl_memories is not None:
+                                val_xl_memories = [mem.detach() if mem is not None else None for mem in val_xl_memories]
+                        else:
+                            logits, loss = model_output
+                            val_xl_memories = None
+
                     loss = loss / val_loss_steps
                     val_loss_accum += loss.detach()
+
             if ddp:
                 dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
             if master_process:
                 print(f"Validation loss: {val_loss_accum.item():.4f}")
                 with open(log_file, "a") as f:
-                    f.write(f"{step} val {val_loss_accum.item():.4f}\n")
+                    f.write(f"{step} val {val_loss_accum.item():.4f} shard_{val_current_shard_num}\n")
 
                 checkpoint_name = f"model_final.pt" if last_step else f"model_{step:05d}.pt"
                 checkpoint_path = os.path.join(log_dir, checkpoint_name)
@@ -129,43 +155,100 @@ def train_memgpt(config_path,dataloader_class=None):
                     'optimizer': optimizer.state_dict(),
                     'step': step,
                     'val_loss': val_loss_accum.item(),
-                    'config': raw_model.config
+                    'config': raw_model.config,
+                    'torch_rng_state': torch.get_rng_state(),
+                    'cuda_rng_state': torch.cuda.get_rng_state_all()    
                 }
                 torch.save(checkpoint, checkpoint_path)
+            raw_model.clear_knn_memory()
 
-               
+        # training loop
         model.train()
         optimizer.zero_grad()
         loss_accum = 0.0
+
         for micro_step in range(grad_accum_steps):
-            x, y = train_loader.next_batch()
+            x, y, current_shard_num = train_loader.next_batch()
             x, y = x.to(device), y.to(device)
+
+            if previous_shard_num is not None and current_shard_num != previous_shard_num:
+                raw_model.clear_knn_memory()
+                xl_memories = None
+
+            previous_shard_num = current_shard_num
+
             if ddp:
-                model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
-            with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                logits, loss = model(x, y)
-            loss = loss / grad_accum_steps
-            loss_accum += loss.detach()
+                model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)  
+
+            with torch.autocast(device_type=device_type, dtype=torch.bfloat16):  
+                model_output = model(x, targets=y, xl_memories=xl_memories)
+
+                if len(model_output) == 3:
+                    logits, loss, xl_memories = model_output
+                    
+                    if xl_memories is not None:
+                        xl_memories = [mem.detach() if mem is not None else None for mem in xl_memories]
+                else:
+                    logits, loss = model_output
+                    xl_memories = None
+
+            loss = loss / grad_accum_steps  
+            loss_accum += loss.detach()  
+                                        
             loss.backward()
 
         if ddp:
-            dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
+            dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG) 
 
-        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  
+        
         lr = get_lr(step)
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
         optimizer.step()
+
         if device_type == 'cuda':
-            torch.cuda.synchronize()
+            torch.cuda.synchronize() 
         t1 = time.time()
-        dt = (t1 - t0) * 1000
+        dt = (t1-t0)  
         tokens_processed = train_loader.B * train_loader.T * grad_accum_steps * ddp_world_size
         tokens_per_sec = tokens_processed / dt
+
+
         if master_process:
-            print(f"Step:{step:5d} | Loss: {loss_accum.item():.6f} | lr: {lr:.4e} | Norm:{norm:.4f} | dt: {dt:.2f}ms | Tok/sec: {tokens_per_sec:.2f}")
+            print(f"step:{step:5d} | loss: {loss_accum.item():.6f} | lr: {lr:.4e} | norm:{norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
             with open(log_file, 'a') as f:
-                f.write(f"{step} train {loss_accum.item():.6f}\n")
+                f.write(f"{step} train {loss_accum.item():.6f} shard_{current_shard_num} \n")
+
+        if last_step and master_process:
+            checkpoint_name = "model_final.pt"
+            checkpoint_path = os.path.join(log_dir, checkpoint_name)
+            
+            checkpoint_copy1_name = "model_final_copy1.pt"
+            checkpoint_copy1_path = os.path.join(log_dir, checkpoint_copy1_name)
+            
+            checkpoint_copy2_name = "model_final_copy2.pt"
+            checkpoint_copy2_path = os.path.join(log_dir, checkpoint_copy2_name)
+
+            checkpoint = {
+                'model': raw_model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'step': step,
+                'val_loss': val_loss_accum.item() if 'val_loss_accum' in locals() else None,
+                'config': raw_model.config,
+                'current_shard_num': current_shard_num,
+                'torch_rng_state': torch.get_rng_state(),
+                'cuda_rng_state': torch.cuda.get_rng_state_all()
+            }
+            torch.save(checkpoint, checkpoint_path)
+            torch.save(checkpoint, checkpoint_copy1_path)
+            torch.save(checkpoint, checkpoint_copy2_path)
+            
+            print(f"Final checkpoint saved: {checkpoint_path}")
+            print(f"Final checkpoint copy 1 saved: {checkpoint_copy1_path}")
+            print(f"Final checkpoint copy 2 saved: {checkpoint_copy2_path}")
+
+    raw_model.cleanup_memory_files() #Cleaning all knn DBs after training
 
     if ddp:
         destroy_process_group()
