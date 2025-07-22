@@ -2,8 +2,13 @@ import os
 import numpy as np
 import torch
 
+def load_tokens(filename):
+    npt = np.load(filename)
+    npt = npt.astype(np.int32)
+    ptt = torch.tensor(npt, dtype=torch.long)
+    return ptt
 
-class DataLoaderLite:
+class DataLoader:
     def __init__(self, B, T, process_rank, num_processes, split, master_process):
         self.B = B
         self.T = T
@@ -11,7 +16,7 @@ class DataLoaderLite:
         self.num_processes = num_processes
         assert split in {'train', 'val'}
 
-        data_root = "edu_fineweb10B"
+        data_root = "data/edu_fineweb10B"
         shards = os.listdir(data_root)
         shards = [s for s in shards if split in s]
         shards = sorted(shards)

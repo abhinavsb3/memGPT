@@ -3,8 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
 import inspect
-from .attention import CasualSelfAttention
-from attention import KNN,KNNAttention,XLAttention
+# from attention import KNN,KNNAttention,XLAttention
+from .attention import KNN,KNNAttention,XLAttention
 
 class MLP(nn.Module):
     def __init__(self, config):
@@ -41,6 +41,7 @@ class GPTConfig:
     n_layer: int = 12  
     n_head: int = 12  
     n_embd: int = 768 
+    n_kv_heads: int = 4
     dropout: float = 0.0
     max_knn_memories: int = 81920
     topk_retrieved_memories: int = 3
@@ -110,6 +111,7 @@ class GPT(nn.Module):
 
         loss = None
         if targets is not None:
+            
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
 
         if len(new_xl_memories) > 0:

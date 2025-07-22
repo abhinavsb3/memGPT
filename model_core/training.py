@@ -73,7 +73,7 @@ def train_memgpt(config_path,dataloader_class=None):
     # Create Model
     model = GPT(GPTConfig(**model_cfg_params))
     model.to(device)
-    use_compile = True
+    use_compile = False #debug 
     if use_compile:
         model = torch.compile(model)
     if ddp:
@@ -103,7 +103,7 @@ def train_memgpt(config_path,dataloader_class=None):
     for step in range(max_steps):
         t0 = time.time()
         last_step = (step == max_steps - 1)
-
+        print(f"validation loop.step={step}")
         if step % 350 == 0 or last_step:
             model.eval()
             val_loader.reset()
@@ -112,17 +112,17 @@ def train_memgpt(config_path,dataloader_class=None):
                 val_loss_accum = 0.0
                 val_loss_steps = 25
                 val_xl_memories = None
-                val_previous_shard_num = None
+                val_previous_shards_num = None
 
                 for _ in range(val_loss_steps):
                     x, y, val_current_shard_num = val_loader.next_batch()
                     x, y = x.to(device), y.to(device)
 
-                    if val_previous_shard_num is not None and val_current_shard_num != val_previous_shard_num:
+                    if val_previous_shards_num is not None and val_current_shard_num != val_previous_shards_num:
                         raw_model.clear_knn_memory()
                         val_xl_memories = None
 
-                    val_previous_shard_num = val_current_shard_num
+                    val_previous_shards_num = val_current_shard_num
 
                     with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                         
@@ -168,14 +168,15 @@ def train_memgpt(config_path,dataloader_class=None):
         loss_accum = 0.0
 
         for micro_step in range(grad_accum_steps):
+            print(f"micro tep= {micro_step}")
             x, y, current_shard_num = train_loader.next_batch()
             x, y = x.to(device), y.to(device)
 
-            if previous_shard_num is not None and current_shard_num != previous_shard_num:
+            if previous_shards_num is not None and current_shard_num != previous_shards_num:
                 raw_model.clear_knn_memory()
                 xl_memories = None
 
-            previous_shard_num = current_shard_num
+            previous_shards_num = current_shard_num
 
             if ddp:
                 model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)  
