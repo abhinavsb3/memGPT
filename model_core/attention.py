@@ -147,12 +147,17 @@ class XLAttention(nn.Module):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         self.n_head = config.n_head
+        self.n_kv_head = getattr(config, 'n_kv_head', config.n_head)  
         self.n_embd = config.n_embd
         self.head_dim = config.n_embd // config.n_head
+        self.kv_head_dim = config.n_embd // self.n_kv_head  
+        self.group_size = self.n_head // self.n_kv_head  
         self.dropout = nn.Dropout(config.dropout if hasattr(config, 'dropout') else 0.0)
         self.scale = self.head_dim ** -0.5
 
-        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
+        self.q_proj = nn.Linear(config.n_embd, config.n_embd)
+        self.k_proj = nn.Linear(config.n_embd, self.n_kv_head * self.kv_head_dim)
+        self.v_proj = nn.Linear(config.n_embd, self.n_kv_head * self.kv_head_dim)
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
         self.c_proj.MEMGPT_SCALE_INIT = 1
 
@@ -161,8 +166,9 @@ class XLAttention(nn.Module):
     def forward(self, x, xl_memory=None):
         B, T, C = x.size()
 
-        qkv = self.c_attn(x) # (B,T,3C)
-        q, k, v = qkv.split(self.n_embd, dim=2) # (B,T,C)
+        q = self.q_proj(x)  # (B, T, C)
+        k = self.k_proj(x)  # (B, T, n_kv_head * kv_head_dim)
+        v = self.v_proj(x)  # (B, T, n_kv_head * kv_head_dim)
 
         # Handle XL memory
         if xl_memory is not None:
@@ -172,13 +178,16 @@ class XLAttention(nn.Module):
             xl_seq_len = k_xl.shape[1]
 
         # Reshape for multi-head attention
-        q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)  # (B, nh, T, hs)
-        k = k.view(B, -1, self.n_head, self.head_dim).transpose(1, 2)  # (B, nh, T+xl, hs)
-        v = v.view(B, -1, self.n_head, self.head_dim).transpose(1, 2)  # (B, nh, T+xl, hs)
+        q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)  # (B, n_head, T, head_dim)
+        k = k.view(B, -1, self.n_kv_head, self.kv_head_dim).transpose(1, 2)  # (B, n_kv_head, T+xl, kv_head_dim) # GQAchange
+        v = v.view(B, -1, self.n_kv_head, self.kv_head_dim).transpose(1, 2)  # (B, n_kv_head, T+xl, kv_head_dim) # GQAchange
 
         # Apply rotary positional encoding
         seq_len = k.shape[2]
         q, k = self.rope.apply_rotary_pos_emb(q, k)
+
+        k = k.repeat_interleave(self.group_size, dim=1)  # (B, n_head, T+xl, kv_head_dim)
+        v = v.repeat_interleave(self.group_size, dim=1)  # (B, n_head, T+xl, kv_head_dim)
 
         # Attention computation
         att = (q @ k.transpose(-2, -1)) * self.scale
@@ -190,34 +199,41 @@ class XLAttention(nn.Module):
         att = F.softmax(att, dim=-1)
         att = self.dropout(att)
 
-        y = att @ v  # (B, nh, T, hs)
+        y = att @ v  # (B, n_head, T, kv_head_dim)
         y = y.transpose(1, 2).contiguous().view(B, T, C)  # (B, T, C)
 
         y = self.c_proj(y)
 
-        # Prepare new XL memories
-        k = k.transpose(1, 2).contiguous().view(B, -1, C) #(B,T+xl,C)
-        v = v.transpose(1, 2).contiguous().view(B, -1, C) #(B,T+xl,C)
-        kv_memories = torch.stack((k, v), dim=-2)
+        # Prepare new XL memories - store original KV dimensions
+        k_orig = k[:, ::self.group_size]  
+        v_orig = v[:, ::self.group_size]  
+        k_orig = k_orig.transpose(1, 2).contiguous().view(B, -1, self.n_kv_head * self.kv_head_dim) 
+        v_orig = v_orig.transpose(1, 2).contiguous().view(B, -1, self.n_kv_head * self.kv_head_dim)  
+        kv_memories = torch.stack((k_orig, v_orig), dim=-2)
 
         if xl_memory is not None:
-            current_kv = kv_memories[:, -xl_seq_len:] #(B,T,C)
+            current_kv = kv_memories[:, -xl_seq_len:] #(B,T,2,C)
         else:
-            current_kv = kv_memories
+            current_kv = kv_memories #(B,T,2,C)
 
-        return y, current_kv
+        return y, current_kv #(B,T,C),(B,T,2,C)
 
 class KNNAttention(nn.Module):
     def __init__(self, config, knn, topk_retrieved_memories=3):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         self.n_head = config.n_head
+        self.n_kv_head = getattr(config, 'n_kv_head', config.n_head)  
         self.n_embd = config.n_embd
         self.head_dim = config.n_embd // config.n_head
+        self.kv_head_dim = config.n_embd // self.n_kv_head  
+        self.group_size = self.n_head // self.n_kv_head  
         self.dropout = nn.Dropout(config.dropout if hasattr(config, 'dropout') else 0.0)
         self.scale = self.head_dim ** -0.5
 
-        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
+        self.q_proj = nn.Linear(config.n_embd, config.n_embd)
+        self.k_proj = nn.Linear(config.n_embd, self.n_kv_head * self.kv_head_dim)
+        self.v_proj = nn.Linear(config.n_embd, self.n_kv_head * self.kv_head_dim)
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
         self.c_proj.MEMGPT_SCALE_INIT = 1
 
@@ -230,8 +246,9 @@ class KNNAttention(nn.Module):
     def forward(self, x, xl_memory=None):
         B, T, C = x.size()
 
-        qkv = self.c_attn(x)
-        q, k, v = qkv.split(self.n_embd, dim=2)
+        q = self.q_proj(x)  # (B, T, C)
+        k = self.k_proj(x)  # (B, T, n_kv_head * kv_head_dim)
+        v = self.v_proj(x)  # (B, T, n_kv_head * kv_head_dim)
 
         q = F.normalize(q, dim=-1)
         k = F.normalize(k, dim=-1)
@@ -243,40 +260,46 @@ class KNNAttention(nn.Module):
             v = torch.cat((v_xl, v), dim=1)
             xl_seq_len = k_xl.shape[1]
 
-        q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
-        k = k.view(B, -1, self.n_head, self.head_dim).transpose(1, 2)
-        v = v.view(B, -1, self.n_head, self.head_dim).transpose(1, 2)
+        q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)  # (B, n_head, T, head_dim)
+        k = k.view(B, -1, self.n_kv_head, self.kv_head_dim).transpose(1, 2)  # (B, n_kv_head, seq_len, kv_head_dim) # GQAchange
+        v = v.view(B, -1, self.n_kv_head, self.kv_head_dim).transpose(1, 2)  # (B, n_kv_head, seq_len, kv_head_dim) # GQAchange
 
         seq_len = k.shape[2]
         q, k = self.rope.apply_rotary_pos_emb(q, k)
 
+        k_expanded = k.repeat_interleave(self.group_size, dim=1)  # (B, n_head, seq_len, kv_head_dim)
+        v_expanded = v.repeat_interleave(self.group_size, dim=1)  # (B, n_head, seq_len, kv_head_dim)
+
         # LOCAL ATTENTION
-        att = (q @ k.transpose(-2, -1)) * self.scale
+        att = (q @ k_expanded.transpose(-2, -1)) * self.scale
         mask = torch.tril(torch.ones(T, seq_len, device=x.device, dtype=torch.bool))
         att = att.masked_fill(~mask, float('-inf'))
         att = F.softmax(att, dim=-1)
         att = self.dropout(att)
-        local_out = att @ v
+        local_out = att @ v_expanded
 
-        # KNN ATTENTION ###
+        # KNN ATTENTION 
         if self.knn.index.ntotal > 0:
             q_search = q.transpose(1, 2).contiguous().view(B, T, C)
             mem_kv = self.knn.search(q_search, topk=self.topk_retrieved_memories)
             mem_k, mem_v = mem_kv.unbind(dim=-2)
 
-            mem_k = mem_k.view(B, T, self.topk_retrieved_memories, self.n_head, self.head_dim)
-            mem_k = mem_k.permute(0, 3, 1, 2, 4)  # (B, nh, T, k, hs)
-            mem_v = mem_v.view(B, T, self.topk_retrieved_memories, self.n_head, self.head_dim)
-            mem_v = mem_v.permute(0, 3, 1, 2, 4)  # (B, nh, T, k, hs)
+            # Reshape memory K,V according to KV head structure
+            mem_k = mem_k.view(B, T, self.topk_retrieved_memories, self.n_kv_head, self.kv_head_dim)
+            mem_k = mem_k.permute(0, 3, 1, 2, 4)  # (B, n_kv_head, T, k, kv_head_dim)
+            mem_v = mem_v.view(B, T, self.topk_retrieved_memories, self.n_kv_head, self.kv_head_dim)
+            mem_v = mem_v.permute(0, 3, 1, 2, 4)  # (B, n_kv_head, T, k, kv_head_dim)
             mem_k = mem_k.to(q.device)
             mem_v = mem_v.to(q.device)
 
+            # Expand memory K,V to match query heads
+            mem_k_expanded = mem_k.repeat_interleave(self.group_size, dim=1)  # (B, n_head, T, k, kv_head_dim)
+            mem_v_expanded = mem_v.repeat_interleave(self.group_size, dim=1)  # (B, n_head, T, k, kv_head_dim)
 
-
-            mem_att = (q.unsqueeze(-2) @ mem_k.transpose(-2, -1)).squeeze(-2) * self.scale
+            mem_att = (q.unsqueeze(-2) @ mem_k_expanded.transpose(-2, -1)).squeeze(-2) * self.scale
             mem_att = F.softmax(mem_att, dim=-1)
             mem_att = self.dropout(mem_att)
-            mem_out = (mem_att.unsqueeze(-2) @ mem_v).squeeze(-2)
+            mem_out = (mem_att.unsqueeze(-2) @ mem_v_expanded).squeeze(-2)
 
             # Combine local and memory attention
             y = mem_out * self.gate_bias + local_out * (1 - self.gate_bias)
@@ -286,15 +309,15 @@ class KNNAttention(nn.Module):
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         y = self.c_proj(y) #(B,T,C)
 
-        # Prepare new memories
-        k = k.transpose(1, 2).contiguous().view(B, -1, C)
-        v = v.transpose(1, 2).contiguous().view(B, -1, C)
-        kv_memories = torch.stack((k, v), dim=-2)
+        # Prepare new memories - store original KV dimensions
+        k_orig = k.transpose(1, 2).contiguous().view(B, -1, self.n_kv_head * self.kv_head_dim) 
+        v_orig = v.transpose(1, 2).contiguous().view(B, -1, self.n_kv_head * self.kv_head_dim)  
+        kv_memories = torch.stack((k_orig, v_orig), dim=-2)
 
         if xl_memory is not None:
-            current_kv = kv_memories[:, -xl_seq_len:] #(B,T,2,C)
+            current_kv = kv_memories[:, -xl_seq_len:] #(B,T,2,n_kv_head * kv_head_dim) # GQAchange
         else:
-            current_kv = kv_memories #(B,T,2,C)
+            current_kv = kv_memories #(B,T,2,C) 
 
         self.knn.add(current_kv)
 

@@ -41,7 +41,7 @@ class GPTConfig:
     n_layer: int = 12  
     n_head: int = 12  
     n_embd: int = 768 
-    n_kv_heads: int = 4
+    n_kv_head: int = 4
     dropout: float = 0.0
     max_knn_memories: int = 81920
     topk_retrieved_memories: int = 3
