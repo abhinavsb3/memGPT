@@ -9,7 +9,7 @@ import torch._dynamo
 class RotaryPositionalEncoding(nn.Module):
     def __init__(self, dim, max_seq_len=2048, base=10000): 
         super().__init__()
-        assert dim % 2 == 0
+        assert dim % 2 == 0, f"Dimension {dim} must be even for RoPE"
         
         self.dim = dim
         self.max_seq_len = max_seq_len
@@ -31,36 +31,27 @@ class RotaryPositionalEncoding(nn.Module):
             self._cached_seq_len = seq_len
         return self._cached_freqs[0][:seq_len], self._cached_freqs[1][:seq_len]
 
-    def apply_rotary_pos_emb(self, q, k):
-        q_len = q.shape[2]
-        k_len = k.shape[2]
-        assert q.shape[-1] == self.dim, f"Expected q.shape[-1] == {self.dim}, got {q.shape[-1]}"
-        assert k.shape[-1] == self.dim, f"Expected k.shape[-1] == {self.dim}, got {k.shape[-1]}"
-        assert q_len <= self.max_seq_len, f"seq_len {q_len} exceeds max_seq_len {self.max_seq_len}"
-        assert k_len <= self.max_seq_len, f"seq_len {k_len} exceeds max_seq_len {self.max_seq_len}"
+    def apply_rotary_pos_emb(self, x, seq_len=None):
+        if seq_len is None:
+            seq_len = x.shape[2]
+            
+        assert x.shape[-1] == self.dim, f"Expected x.shape[-1] == {self.dim}, got {x.shape[-1]}"
+        assert seq_len <= self.max_seq_len, f"seq_len {seq_len} exceeds max_seq_len {self.max_seq_len}"
 
-        device = q.device
-        cos_q, sin_q = self._get_freqs(q_len, device)  # both [seq_len, dim//2]
-        cos_k, sin_k = self._get_freqs(k_len, device)  # both [seq_len, dim//2]
+        device = x.device
+        cos, sin = self._get_freqs(seq_len, device)  # both [seq_len, dim//2]
+
+        # Expand to match x: [1, 1, seq_len, dim//2]
+        cos = cos[None, None, :, :].expand(x.shape[0], x.shape[1], -1, -1)
+        sin = sin[None, None, :, :].expand(x.shape[0], x.shape[1], -1, -1)
+
+        x1 = x[..., ::2]   # even indices
+        x2 = x[..., 1::2]  # odd indices
+
+        x_rotated_even = x1 * cos - x2 * sin
+        x_rotated_odd = x1 * sin + x2 * cos
         
-
-        # Expand to match q/k: [1, 1, seq_len, dim//2]
-        cos_q = cos_q[None, None, :, :].expand(q.shape[0], q.shape[1], -1, -1)
-        sin_q = sin_q[None, None, :, :].expand(q.shape[0], q.shape[1], -1, -1)
-        cos_k = cos_k[None, None, :, :].expand(q.shape[0], q.shape[1], -1, -1)
-        sin_k = sin_k[None, None, :, :].expand(q.shape[0], q.shape[1], -1, -1)
-
-        def apply(x,cos, sin):
-            x1 = x[..., ::2]
-            x2 = x[..., 1::2]
-    
-            x_rotated_even = x1 * cos - x2 * sin
-            x_rotated_odd = x1 * sin + x2 * cos
-            return torch.stack((x_rotated_even, x_rotated_odd), dim=-1).flatten(-2)
-
-        q_rot = apply(q, cos_q, sin_q)
-        k_rot = apply(k, cos_k, sin_k)
-        return q_rot, k_rot
+        return torch.stack((x_rotated_even, x_rotated_odd), dim=-1).flatten(-2)
     
 class KNN():
     def __init__(self, dim, max_memories, process_rank=0):
@@ -150,18 +141,19 @@ class XLAttention(nn.Module):
         self.n_kv_head = getattr(config, 'n_kv_head', config.n_head)  
         self.n_embd = config.n_embd
         self.head_dim = config.n_embd // config.n_head
-        self.kv_head_dim = config.n_embd // self.n_kv_head  
+        self.kv_head_dim = self.head_dim 
         self.group_size = self.n_head // self.n_kv_head  
         self.dropout = nn.Dropout(config.dropout if hasattr(config, 'dropout') else 0.0)
         self.scale = self.head_dim ** -0.5
-
+        
         self.q_proj = nn.Linear(config.n_embd, config.n_embd)
         self.k_proj = nn.Linear(config.n_embd, self.n_kv_head * self.kv_head_dim)
         self.v_proj = nn.Linear(config.n_embd, self.n_kv_head * self.kv_head_dim)
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
         self.c_proj.MEMGPT_SCALE_INIT = 1
 
-        self.rope = RotaryPositionalEncoding(self.head_dim)
+        self.rope_q = RotaryPositionalEncoding(self.head_dim)
+        self.rope_k = RotaryPositionalEncoding(self.kv_head_dim)
 
     def forward(self, x, xl_memory=None):
         B, T, C = x.size()
@@ -184,7 +176,8 @@ class XLAttention(nn.Module):
 
         # Apply rotary positional encoding
         seq_len = k.shape[2]
-        q, k = self.rope.apply_rotary_pos_emb(q, k)
+        q = self.rope_q.apply_rotary_pos_emb(q)           
+        k = self.rope_k.apply_rotary_pos_emb(k)
 
         k = k.repeat_interleave(self.group_size, dim=1)  # (B, n_head, T+xl, kv_head_dim)
         v = v.repeat_interleave(self.group_size, dim=1)  # (B, n_head, T+xl, kv_head_dim)
@@ -226,7 +219,7 @@ class KNNAttention(nn.Module):
         self.n_kv_head = getattr(config, 'n_kv_head', config.n_head)  
         self.n_embd = config.n_embd
         self.head_dim = config.n_embd // config.n_head
-        self.kv_head_dim = config.n_embd // self.n_kv_head  
+        self.kv_head_dim = self.head_dim   
         self.group_size = self.n_head // self.n_kv_head  
         self.dropout = nn.Dropout(config.dropout if hasattr(config, 'dropout') else 0.0)
         self.scale = self.head_dim ** -0.5
@@ -241,7 +234,8 @@ class KNNAttention(nn.Module):
         self.topk_retrieved_memories = topk_retrieved_memories
         self.knn = knn
 
-        self.rope = RotaryPositionalEncoding(self.head_dim)
+        self.rope_q = RotaryPositionalEncoding(self.head_dim)
+        self.rope_k = RotaryPositionalEncoding(self.kv_head_dim)
     
     def forward(self, x, xl_memory=None):
         B, T, C = x.size()
@@ -265,7 +259,8 @@ class KNNAttention(nn.Module):
         v = v.view(B, -1, self.n_kv_head, self.kv_head_dim).transpose(1, 2)  # (B, n_kv_head, seq_len, kv_head_dim) # GQAchange
 
         seq_len = k.shape[2]
-        q, k = self.rope.apply_rotary_pos_emb(q, k)
+        q = self.rope_q.apply_rotary_pos_emb(q)           
+        k = self.rope_k.apply_rotary_pos_emb(k)
 
         k_expanded = k.repeat_interleave(self.group_size, dim=1)  # (B, n_head, seq_len, kv_head_dim)
         v_expanded = v.repeat_interleave(self.group_size, dim=1)  # (B, n_head, seq_len, kv_head_dim)
@@ -279,9 +274,12 @@ class KNNAttention(nn.Module):
         local_out = att @ v_expanded
 
         # KNN ATTENTION 
+        #Making some modifications to the query shape for searching in the db, which is different from the original paper.
         if self.knn.index.ntotal > 0:
-            q_search = q.transpose(1, 2).contiguous().view(B, T, C)
-            mem_kv = self.knn.search(q_search, topk=self.topk_retrieved_memories)
+            q_grouped = q.view(B, self.n_kv_head, self.group_size, T, self.head_dim) #(B, n_head, T, head_dim) -> (B, n_kv_head, group_size, T, head_dim)
+            q_mean = q_grouped.mean(dim=2)  # (B, 4, T, 64) , took average across the 3 heads in each group
+            q_knn = q_mean.transpose(1, 2).contiguous().view(B, T, -1)  # (B, T, 256)
+            mem_kv = self.knn.search(q_knn, topk=self.topk_retrieved_memories)
             mem_k, mem_v = mem_kv.unbind(dim=-2)
 
             # Reshape memory K,V according to KV head structure

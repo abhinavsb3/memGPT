@@ -1,0 +1,3 @@
+0 val 10.9481 shard_0
+0 train 10.947327 shard_0 
+1 train 10.917969 shard_0 

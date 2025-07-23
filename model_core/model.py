@@ -52,9 +52,10 @@ class GPT(nn.Module):
         super().__init__()
         self.config = config
         self.process_rank = process_rank
+        kv_dim = config.n_kv_head * (config.n_embd // config.n_head)
 
         # Initialize KNN memory
-        self.knn = KNN(config.n_embd, config.max_knn_memories, process_rank)
+        self.knn = KNN(kv_dim, config.max_knn_memories, process_rank)
 
         self.transformer = nn.ModuleDict(dict(
             wte=nn.Embedding(config.vocab_size, config.n_embd),
@@ -120,6 +121,13 @@ class GPT(nn.Module):
           return logits, loss
         
     def configure_optimizers(self, weight_decay, learning_rate, device_type, master_process):
+        #print model parameters
+        total_params = sum(p.numel() for p in self.parameters())
+        print(f"Total parameters: {total_params}")
+        # Trainable parameters
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        print(f"Trainable parameters: {trainable_params}")
+
         # Get all parameters that require grad
         param_dict = {pn: p for pn, p in self.named_parameters()}
         param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}

@@ -103,7 +103,6 @@ def train_memgpt(config_path,dataloader_class=None):
     for step in range(max_steps):
         t0 = time.time()
         last_step = (step == max_steps - 1)
-        print(f"validation loop.step={step}")
         if step % 350 == 0 or last_step:
             model.eval()
             val_loader.reset()
@@ -168,7 +167,6 @@ def train_memgpt(config_path,dataloader_class=None):
         loss_accum = 0.0
 
         for micro_step in range(grad_accum_steps):
-            print(f"micro tep= {micro_step}")
             x, y, current_shard_num = train_loader.next_batch()
             x, y = x.to(device), y.to(device)
 

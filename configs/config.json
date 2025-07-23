@@ -5,13 +5,14 @@
     "n_layer": 12,
     "n_head": 12,
     "n_embd": 768,
-    "n_kv_head": 4
+    "n_kv_head": 4,
+    "max_knn_memories": 81920
   },
   "training": {
     "max_steps": 19073,
     "log_dir": "log",
     "total_batch_size": 524288,
-    "B": 8,
+    "B": 64,
     "T": 1024,
     "max_lr": 0.0006,
     "min_lr": 0.00006,
