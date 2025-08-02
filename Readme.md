@@ -17,13 +17,14 @@ This model is designed for scalable training, long-context understanding, and ef
 - ✅ **Mixed Precision & DDP Training**: Efficient large-scale training using `torch.autocast` and `torchrun`  
 
 ---
+
 Key Modifications from the Original Paper:
  • Replaced the default positional encoding with Rotary Positional Embeddings (RoPE)
  • Altered the attention mechanism to use Grouped Query Attention
  • Customized the DataLoader to support sharded datasets and data parallelism
  • Implemented Mixed Precision Training along with Distributed Data Parallel (DDP) support
  • Tweaked several training and model hyperparameters for better adaptability.
----
+
 
 ## 📁 Project Structure
 
@@ -168,5 +169,6 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 Ensure PyTorch and CUDA versions match your GPU setup.
+
 
 
