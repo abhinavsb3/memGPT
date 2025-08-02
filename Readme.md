@@ -1,7 +1,7 @@
 ﻿
 # 🧠 Memorizing Transformer with Grouped Query Attention
 
-An extended GPT-style 118m param model that integrates the key ideas from "Memorizing Transformers" (Wu et al., 2022) with practical enhancements like Grouped Query Attention, KNN-based memory lookup, RoPE, and XL-style memory recurrence.
+An extended GPT-style 118m param model that integrates the key ideas from "Memorizing Transformers" (Wu et al., 2022) with my own modification for practical enhancements like Grouped Query Attention, Alteration in KNN lookup, RoPE, and XL-style memory recurrenceand and an improved DataLoader.
 
 This model is designed for scalable training, long-context understanding, and efficient memory usage.
 ---
@@ -16,6 +16,13 @@ This model is designed for scalable training, long-context understanding, and ef
 - ✅ **Custom Memory Clearing Logic**: Memory reset and lifespan mechanisms tuned for stability and performance during training  
 - ✅ **Mixed Precision & DDP Training**: Efficient large-scale training using `torch.autocast` and `torchrun`  
 
+---
+Key Modifications from the Original Paper:
+ • Replaced the default positional encoding with Rotary Positional Embeddings (RoPE)
+ • Altered the attention mechanism to use Grouped Query Attention
+ • Customized the DataLoader to support sharded datasets and data parallelism
+ • Implemented Mixed Precision Training along with Distributed Data Parallel (DDP) support
+ • Tweaked several training and model hyperparameters for better adaptability.
 ---
 
 ## 📁 Project Structure
@@ -161,4 +168,5 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 Ensure PyTorch and CUDA versions match your GPU setup.
+
 
